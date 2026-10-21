@@ -1,7 +1,9 @@
 import os
 import re
 import uuid
+import threading
 import logging
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -10,15 +12,24 @@ from telegram.ext import (
 
 logging.basicConfig(level=logging.INFO)
 
-# Conversation states
-MOBILE, GMAIL, APP_PASS = range(3)
+# --- FLASK SERVER TO KEEP RENDER WEB SERVICE ALIVE ---
+flask_app = Flask(__name__)
 
-# In-memory storage - use database in production
+@flask_app.route('/')
+def home():
+    return "Bot is Running! FamPay API Bot is Live."
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
+# --- TELEGRAM BOT LOGIC ---
+MOBILE, GMAIL, APP_PASS = range(3)
 USERS_DB = {}
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("BOT_TOKEN not set in Environment Variables!")
+    raise ValueError("BOT_TOKEN not set!")
 
 def main_keyboard():
     return InlineKeyboardMarkup([
@@ -28,124 +39,73 @@ def main_keyboard():
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "👋 Welcome to Fam Pay Api Bot [ FREE ]\n\n"
-        "Click 'Get API Key' to generate your key.\n\n"
-        "⚠️ Your Gmail App Password is encrypted and never shared."
+    await update.message.reply_text(
+        "👋 Welcome to Fam Pay Api Bot [ FREE ]\n\nClick 'Get API Key' to generate your key.",
+        reply_markup=main_keyboard()
     )
-    await update.message.reply_text(text, reply_markup=main_keyboard())
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Use /start to begin.", reply_markup=main_keyboard())
-
-# --- Get API Key Flow ---
 async def getkey_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     if user_id in USERS_DB:
         await query.message.reply_text(
-            "⚠️ You already have an API Key!\n\n"
-            "If you want to create a new API key, please use '🔑 My API Key' option to delete your existing key first.\n\n"
-            "Each user can have only ONE active API key at a time.",
+            "⚠️ You already have an API Key!\n\nIf you want to create a new API key, please use '🔑 My API Key' option to delete your existing key first.\n\nEach user can have only ONE active API key at a time.",
             reply_markup=main_keyboard()
         )
         return ConversationHandler.END
 
     await query.message.reply_text(
-        "📱 Step 1/3: Enter Your Mobile Number\n\n"
-        "📌 Please enter the same mobile number you used to create your FamPay account.\n\n"
-        "Example: 9876543210\n\n"
-        "⚠️ Note: This should be the number registered with FamPay.\n\n"
-        "Type your 10-digit mobile number."
+        "📱 Step 1/3: Enter Your Mobile Number\n\n📌 Please enter the same mobile number you used to create your FamPay account.\n\nExample: 9876543210\n\n⚠️ Note: This should be the number registered with FamPay.\n\nType your 10-digit mobile number."
     )
     return MOBILE
 
 async def mobile_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mobile = update.message.text.strip()
     if not re.fullmatch(r"\d{10}", mobile):
-        await update.message.reply_text("❌ Invalid! Please enter a valid 10-digit number.\nExample: 9876543210")
+        await update.message.reply_text("❌ Invalid! Enter 10-digit number.")
         return MOBILE
-    
     context.user_data['mobile'] = mobile
     await update.message.reply_text(
-        "📧 Step 2/3: Enter Your Gmail Address\n\n"
-        "📌 Please enter the same Gmail address that is linked to your FamPay account.\n\n"
-        "Example: yourname@gmail.com\n\n"
-        "⚠️ Important:\n"
-        "• This Gmail should be the one where you receive payment notifications\n"
-        "• You will need its App Password in the next step\n\n"
-        "Type your Gmail address."
+        "📧 Step 2/3: Enter Your Gmail Address\n\n📌 Please enter the same Gmail that is linked to your FamPay account.\n\nExample: yourname@gmail.com\n\nType your Gmail address."
     )
     return GMAIL
 
 async def gmail_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gmail = update.message.text.strip()
     if not re.fullmatch(r"[^@]+@[^@]+\.[^@]+", gmail):
-        await update.message.reply_text("❌ Invalid Gmail! Please enter correct Gmail.")
+        await update.message.reply_text("❌ Invalid Gmail!")
         return GMAIL
-
     context.user_data['gmail'] = gmail
     await update.message.reply_text(
-        "🔒 Step 3/3: Enter Gmail App Password\n\n"
-        "📌 Please enter the App Password for the Gmail account you just provided.\n\n"
-        "❗ Don't have an App Password? Follow these steps:\n\n"
-        "1️⃣ Enable 2-Step Verification\n"
-        "• Go to Google Account Security\n"
-        "• Click on '2-Step Verification'\n"
-        "• Follow the setup process\n\n"
-        "2️⃣ Generate App Password\n"
-        "• After enabling 2FA, search for 'App Passwords'\n"
-        "• Name it 'FamPay API'\n"
-        "• Click 'Create'\n\n"
-        "3️⃣ Copy the Password\n"
-        "• Google will show a 16-character password\n"
-        "• Format: xxxx xxxx xxxx xxxx\n"
-        "• Copy it immediately (won't be shown again!)\n\n"
-        "🔒 Now paste your 16-character app password here:"
+        "🔒 Step 3/3: Enter Gmail App Password\n\n📌 Please enter the App Password for the Gmail account you just provided.\n\n1️⃣ Enable 2-Step Verification\n2️⃣ Generate App Password -> Name it 'FamPay API'\n3️⃣ Copy 16-char password\n\nNow paste your app password here:"
     )
     return APP_PASS
 
 async def app_pass_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app_pass_raw = update.message.text.strip()
     app_pass = app_pass_raw.replace(" ", "")
-    
     if len(app_pass) < 16:
-        await update.message.reply_text("❌ Invalid App Password! It should be 16 characters.\nPlease paste again.")
+        await update.message.reply_text("❌ Invalid App Password! 16 chars needed.")
         return APP_PASS
 
     await update.message.reply_text("⏳ Processing your request...\nGenerating API Key...")
-    
-    # Try to delete user's message containing password for safety
     try:
         await update.message.delete()
     except:
         pass
 
     api_key = "FAM_" + uuid.uuid4().hex + uuid.uuid4().hex + uuid.uuid4().hex[:8]
-    user_id = update.effective_user.id
-    
-    USERS_DB[user_id] = {
+    USERS_DB[update.effective_user.id] = {
         "mobile": context.user_data['mobile'],
         "email": context.user_data['gmail'],
         "api_key": api_key,
-        # In production, ENCRYPT app_pass before saving! Don't save plain.
-        "app_pass": app_pass 
+        "app_pass": app_pass
     }
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=(
-            f"✅ API Key Generated Successfully!\n\n"
-            f"🔑 Your API Key:\n`{api_key}`\n\n"
-            f"📧 Registered Email: {context.user_data['gmail']}\n"
-            f"📱 Mobile Number: {context.user_data['mobile']}\n\n"
-            f"⚠️ Important:\n"
-            f"• Keep your API Key secret\n"
-            f"• Never share it publicly\n"
-            f"• Use it in API requests\n\n"
-            f"📚 Use 'Documentation' button for API usage guide"
-        ),
+        text=f"✅ API Key Generated Successfully!\n\n🔑 Your API Key:\n`{api_key}`\n\n📧 Email: {context.user_data['gmail']}\n📱 Mobile: {context.user_data['mobile']}",
         parse_mode="Markdown",
         reply_markup=main_keyboard()
     )
@@ -153,36 +113,17 @@ async def app_pass_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def docs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text(
-        "📚 Complete API Documentation\n\n"
-        "1. Generate QR Code for Payment\n"
-        "Generate a UPI QR code for receiving payments.\n\n"
-        "Endpoint:\nGET https://your-render-url.onrender.com/qr.php?upi=YOUR_UPI_ID&amount=AMOUNT\n\n"
-        "Parameters:\n• upi - Your UPI ID (e.g., example@okhdfcbank)\n• amount - OPTIONAL Amount to pay\n  If amount is 0 or parameter is not used, user can enter any amount\n\n"
-        "2. Verify Payment Status\n"
-        "Endpoint:\nGET https://your-render-url.onrender.com/verify.php?order_id=ORDER_ID&api_key=YOUR_API_KEY\n\n"
-        "💡 Quick Tips:\n• QR codes expire after 5 minutes\n• Save order_id for verification\n• Keep API key confidential\n\n"
-        "Support: @ANUJxCODER",
-        reply_markup=main_keyboard()
-    )
+    await update.callback_query.message.reply_text("📚 Documentation - Bot Only Version\n\nThis bot currently generates API Keys. Add your QR/Verify API later if needed.", reply_markup=main_keyboard())
 
 async def mykey_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    user_id = update.callback_query.from_user.id
-    data = USERS_DB.get(user_id)
+    data = USERS_DB.get(update.callback_query.from_user.id)
     if not data:
         await update.callback_query.message.reply_text("❌ No API Key found! Click 'Get API Key' first.", reply_markup=main_keyboard())
         return
-
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Delete API Key", callback_data="deletekey")]])
     await update.callback_query.message.reply_text(
-        f"🔑 Your API Information\n\n"
-        f"API Key:\n`{data['api_key']}`\n\n"
-        f"Registered Email: {data['email']}\n"
-        f"Mobile Number: {data['mobile']}\n\n"
-        f"⚠️ Never share your API Key publicly!\n\n"
-        f"🗑️ Click below to delete your API key if needed\n"
-        f"⚠️ Warning: This action is irreversible!",
+        f"🔑 Your API Information\n\nAPI Key:\n`{data['api_key']}`\n\nEmail: {data['email']}\nMobile: {data['mobile']}\n\n⚠️ Never share your API Key publicly!",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -192,7 +133,7 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id
     if user_id in USERS_DB:
         del USERS_DB[user_id]
-        await update.callback_query.message.reply_text("✅ API Key Deleted Successfully!", reply_markup=main_keyboard())
+        await update.callback_query.message.reply_text("✅ API Key Deleted!", reply_markup=main_keyboard())
     else:
         await update.callback_query.message.reply_text("❌ No key to delete.", reply_markup=main_keyboard())
 
@@ -200,9 +141,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelled.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
-def main():
+def run_bot():
     app = ApplicationBuilder().token(TOKEN).build()
-
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(getkey_callback, pattern="^getkey$")],
         states={
@@ -212,16 +152,14 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(docs_callback, pattern="^docs$"))
     app.add_handler(CallbackQueryHandler(mykey_callback, pattern="^mykey$"))
     app.add_handler(CallbackQueryHandler(delete_callback, pattern="^deletekey$"))
-
-    print("Bot is running... Polling mode")
+    print("Bot Polling Started...")
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=run_flask).start()
+    run_bot()
